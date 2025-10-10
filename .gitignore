@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*/__pycache__/
+*.pyc
+
+# Ignore virtual environment
+.venv/
+
+# Ignore all log files
+*.log
+
+# Ignore dataset folder
+data/
+
+# Jupyter
+.ipynb_checkpoints/

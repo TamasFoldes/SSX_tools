@@ -8,7 +8,7 @@
 #SBATCH --output=R-%x.%j.out
 #SBATCH --error=R-%x.%j.err
 
-module load crystfel/0.11.1
+module load crystfel
 
 ./indexamajig_python.py
 

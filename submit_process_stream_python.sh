@@ -8,8 +8,8 @@
 #SBATCH --output=R-%x.%j.out
 #SBATCH --error=R-%x.%j.err
 
-module load crystfel/0.11.1
-module load ccp4
+module load crystfel
+# module load ccp4
 module load xds
 
 ./process_stream_python.py
