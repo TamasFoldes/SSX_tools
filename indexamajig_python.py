@@ -11,6 +11,46 @@ import re
 import h5py as h5
 
 log_filename = "indexamajig.log"
+log_level = logging.INFO
+
+
+def main():
+    logging.getLogger(__name__).setLevel(logging.INFO)
+
+    h5_location = "/gpfs/ga/data/visitor/mx2633/id29/20250328/RAW_DATA/Mb_data_types/int32_925Hz/run_01_ssx_foil_collection/Mb-Mb*.h5"
+    hitfile = "hits.lst"
+    indexamajig_out_filename = "indexamajig_output.log"
+    indexamajig_err_filename = "indexamajig_error.log"
+    geom_file = "../jungfrau4m-optimized.geom"
+    cell_file = "../myoglobin_full.cell"
+
+    get_selected_hits(pattern=h5_location,
+                      hitfile=hitfile,
+                      onlyhits=False)
+
+    indexamajig_command = f"""indexamajig --geometry {geom_file} \
+                                          --input {hitfile} \
+                                          --pdb {cell_file} \
+                                          --output run_dense_first.stream \
+                                          --peaks peakfinder8 \
+                                          --min-peaks 10 \
+                                          --multi \
+                                          --peak-radius=4.0,6.0,10.0 \
+                                          --min-pix-count=3 \
+                                          --min-snr=4 \
+                                          --threshold=800 \
+                                          --local-bg-radius=10 \
+                                          --indexing xgandalf,mosflm \
+                                          --int-radius=4.0,6.0,10.0 \
+                                          --no-non-hits-in-stream \
+                                          --no-retry \
+                                          --xgandalf-fast-execution \
+                                          -j 20"""
+
+    run_indexamajig(indexamajig_command,
+                    out_filename=indexamajig_out_filename,
+                    err_filename=indexamajig_err_filename)
+    get_indexing_statistics(filename=indexamajig_err_filename)
 
 
 class StoreOutput:
@@ -29,7 +69,7 @@ class StoreOutput:
         self.log_file.flush()
 
 
-def log_to_file(log_filename, log_level=logging.INFO):
+def log_to_file(log_filename, log_level=log_level):
     """Decorator to log function output (stdout & stderr) to a file and also keep printing to console."""
 
     def decorator(func):
@@ -77,7 +117,7 @@ def log_to_file(log_filename, log_level=logging.INFO):
     return decorator
 
 
-@log_to_file(log_filename, log_level=logging.INFO)
+@log_to_file(log_filename, log_level=log_level)
 def get_selected_hits(pattern, Nsamples=None, rseed=42, Nmax=None, hitfile=None, onlyhits=True):
 
     @log_to_file(log_filename, log_level=logging.INFO)
@@ -96,8 +136,11 @@ def get_selected_hits(pattern, Nsamples=None, rseed=42, Nmax=None, hitfile=None,
                 dset_path = "/entry_0000/measurement/data"
                 ishit_path = "/entry_0000/processing/peakfinder/isHit"
                 for i in range(len(h5file[dset_path])):
-                    if h5file[ishit_path][i] == 1 or onlyhits == False:
+                    if onlyhits == False:
                         all_hits.append("%s //%d\n" % (filename, i))
+                    if onlyhits == True:
+                        if h5file[ishit_path][i] == 1:
+                            all_hits.append("%s //%d\n" % (filename, i))
         return all_hits
 
     np.random.seed(rseed)
@@ -123,7 +166,7 @@ def get_selected_hits(pattern, Nsamples=None, rseed=42, Nmax=None, hitfile=None,
         return selected_hits
 
 
-@log_to_file(log_filename, log_level=logging.INFO)
+@log_to_file(log_filename, log_level=log_level)
 def run_indexamajig(indexamajig_command,
                     out_filename="indexamajig_output.log",
                     err_filename="indexamajig_error.log"):
@@ -152,7 +195,7 @@ def run_indexamajig(indexamajig_command,
                 logging.info("Indexamajig finished successfully")
 
 
-@log_to_file(log_filename, log_level=logging.INFO)
+@log_to_file(log_filename, log_level=log_level)
 def get_indexing_statistics(filename):
     logging.info(f"Reading indexing statistics from file: {filename}")
     tail_command = f"tail -n 10 {filename}"
@@ -171,39 +214,4 @@ def get_indexing_statistics(filename):
 
 
 if __name__ == "__main__":
-    logging.getLogger(__name__).setLevel(logging.INFO)
-
-    h5_location = "/gpfs/ga/data/visitor/mx2633/id29/20250328/RAW_DATA/Mb_data_types/int32_925Hz/run_01_ssx_foil_collection/Mb-Mb*.h5"
-    hitfile = "hits.lst"
-    indexamajig_out_filename = "indexamajig_output.log"
-    indexamajig_err_filename = "indexamajig_error.log"
-    geom_file = "../jungfrau4m-optimized.geom"
-    cell_file = "../myoglobin_full.cell"
-
-    selected_hits = get_selected_hits(pattern=h5_location,
-                                      hitfile=hitfile,
-                                      onlyhits=False)
-
-    indexamajig_command = f"""indexamajig --geometry {geom_file} \
-                                          --input {hitfile} \
-                                          --pdb {cell_file} \
-                                          --output run_dense_first.stream \
-                                          --peaks peakfinder8 \
-                                          --min-peaks 10 \
-                                          --multi \
-                                          --peak-radius=4.0,6.0,10.0 \
-                                          --min-pix-count=3 \
-                                          --min-snr=4 \
-                                          --threshold=800 \
-                                          --local-bg-radius=10 \
-                                          --indexing xgandalf,mosflm \
-                                          --int-radius=4.0,6.0,10.0 \
-                                          --no-non-hits-in-stream \
-                                          --no-retry \
-                                          --xgandalf-fast-execution \
-                                          -j 20"""
-
-    run_indexamajig(indexamajig_command,
-                    out_filename=indexamajig_out_filename,
-                    err_filename=indexamajig_err_filename)
-    get_indexing_statistics(filename=indexamajig_err_filename)
+    main()

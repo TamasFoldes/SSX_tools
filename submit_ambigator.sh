@@ -12,7 +12,7 @@
 hostname
 
 module purge
-module load crystfel/0.11.1 >/dev/null
+module load crystfel >/dev/null
 module load ccp4 >/dev/null
 module load xds >/dev/null
 
