@@ -2,7 +2,7 @@
 #SBATCH --job-name=gen_0_4_p
 #SBATCH --partition=mx
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=40
+#SBATCH --cpus-per-task=20
 #SBATCH --time 72:00:00
 #SBATCH --nodes=1
 #SBATCH --output=R-%x.%j.out
@@ -18,10 +18,10 @@ printf "" > h5_generation.log
 
 # ===== Configuration =====
 nframes=1000     # number of frames; also the scaling factor for N
-nthreads=40      # number of computational threads
+nthreads=20      # number of computational threads
 chunksize=200    # number of frames generated at once before writing
 ntotal=40000     # total number of frames to process
-sleep_time=1     # seconds to sleep between iterations
+sleep_time=0.2   # seconds to sleep between iterations
 # =========================
 
 # Compute number of iterations

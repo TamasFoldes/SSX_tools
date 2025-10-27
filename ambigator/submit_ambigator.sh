@@ -1,5 +1,4 @@
 #!/bin/bash
-
 #SBATCH --job-name=AcNiR_2.0_ambi
 #SBATCH --partition=mx-low
 #SBATCH --ntasks=20

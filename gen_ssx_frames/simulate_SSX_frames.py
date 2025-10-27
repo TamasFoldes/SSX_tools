@@ -1,7 +1,6 @@
 import numpy as np
 import h5py as h5
 import hdf5plugin
-hdf5plugin.register()
 from pathlib import Path
 import copy
 import logging
@@ -9,20 +8,20 @@ import multiprocessing as mp
 import argparse
 import os
 import sys
-
 from scipy.spatial.transform import Rotation
 
 from dxtbx.model import Crystal
 from dxtbx.model.beam import BeamFactory
 from scitbx.matrix import sqr
-from simtbx import nanoBragg
-from simtbx.nanoBragg.sim_data import Amatrix_dials2nanoBragg, SimData
+# from simtbx import nanoBragg
+# from simtbx.nanoBragg.sim_data import Amatrix_dials2nanoBragg
+from simtbx.nanoBragg.sim_data import SimData
 from simtbx.nanoBragg.nanoBragg_beam import NBbeam
 from simtbx.nanoBragg.nanoBragg_crystal import NBcrystal
 from simtbx.diffBragg import utils
-import itertools
 
 cuda = False
+hdf5plugin.register()
 
 
 def parse_args():
@@ -84,6 +83,13 @@ def parse_args():
         help="Force overwrite of existing output file. (default: False)"
     )
 
+    parser.add_argument(
+        "-l","--logfile",
+        type=str,
+        default="h5_generation.log",
+        help="Name of the logfile. (default: %(default)s)"
+    )
+
     args = parser.parse_args()
 
     # --- Validation ---
@@ -103,8 +109,8 @@ def parse_args():
         errors.append(f"Output file '{args.h5_file}' already exists. Use --force to overwrite.")
 
     if errors:
-        for e in errors:
-            logger.error(e)
+        # for e in errors:
+        #     logger.error(e)
         raise ValueError("Invalid command-line arguments:\n" + "\n".join(errors))
 
     return args
@@ -123,10 +129,11 @@ def setup_logging(log_path, log_level=logging.INFO, overwrite_log=False):
     else:
         file_path.touch(exist_ok=True)
 
-    logger_name = f"logger_{file_path.parent.name}_{file_path.stem}"
-    logger = logging.getLogger(logger_name)
+    # logger_name = f"logger_{file_path.parent.name}_{file_path.stem}"
+    # logger = logging.getLogger(logger_name)
+    logger = logging.getLogger(__name__)
     logger.setLevel(log_level)
-    logger.propagate = False
+    logger.propagate = True
 
     # Check if a handler for the same log file already exists
     existing_handler = None
@@ -149,10 +156,73 @@ def setup_logging(log_path, log_level=logging.INFO, overwrite_log=False):
     return logger
 
 
+def safe_cast(array: np.ndarray, dtype: np.dtype, verbose: bool = False) -> np.ndarray:
+        """
+        Safely cast a NumPy array to a specified dtype.
+        Clips values to the valid range of the dtype to avoid infs or overflows.
+        Optionally prints out any values that were changed.
+
+        Parameters
+        ----------
+        array : np.ndarray
+            Input array to be converted.
+        dtype : np.dtype or type
+            Target data type (e.g., np.uint8, np.int16, np.float32).
+        verbose : bool, optional
+            If True, prints when values are clipped or replaced. Default is False.
+
+        Returns
+        -------
+        np.ndarray
+            Array safely cast to the specified dtype.
+        """
+        logger = logging.getLogger(__name__)
+        dtype = np.dtype(dtype)
+
+        # Keep original for comparison
+        original = np.copy(array)
+
+        # Replace NaN and infinities with large/small finite numbers
+        array = np.nan_to_num(array, nan=0.0, posinf=np.inf, neginf=-np.inf)
+
+        # Clip to dtype range if needed
+        if np.issubdtype(dtype, np.integer):
+            info = np.iinfo(dtype)
+            min_val, max_val = info.min, info.max
+        elif np.issubdtype(dtype, np.floating):
+            info = np.finfo(dtype)
+            min_val, max_val = info.min, info.max
+        else:
+            raise TypeError(f"Unsupported dtype: {dtype}")
+
+        # Identify out-of-range elements
+        mask_low = array < min_val
+        mask_high = array > max_val
+        mask_invalid = ~np.isfinite(original)
+
+        if verbose and (mask_low.any() or mask_high.any() or mask_invalid.any()):
+            indices = np.where(mask_low | mask_high | mask_invalid)
+            for i in zip(*indices):
+                old_val = original[i]
+                new_val = (
+                    min_val if mask_low[i]
+                    else max_val if mask_high[i]
+                    else 0.0 if mask_invalid[i]
+                    else array[i]
+                )
+                # print(f"Value {old_val} at index {i} clipped to {new_val}")
+                logger.warning(f"Value {old_val} at index {i} clipped to {new_val}")
+
+        # Apply clipping
+        array = np.clip(array, min_val, max_val)
+
+        return array.astype(dtype)
+
+
 class SimFrame:
     def __init__(self):
-        self.pdb_file="MYO-spars_refine_064_full.pdb"
-        self.wavelengths=[1.0779, 1.0747, 1.0725, 1.0704, 1.0672]
+        self.pdb_file=None
+        self.wavelengths=[1.0725]
         self.Ncells_abc=(3,3,3)
         self.pixelsize_mm=0.075
         self.detector_distance_mm=100
@@ -162,6 +232,8 @@ class SimFrame:
         self.img=None
         self.polarization_fraction=0.99
         self.beam_size_mm=0.0005
+        self.flux=2.0e11
+
 
     def _update_params(self, params: dict, *, allow_new: bool = False) -> None:
         """
@@ -176,44 +248,63 @@ class SimFrame:
             if hasattr(self, key) or allow_new:
                 setattr(self, key, value)
 
+
     def _random_rotmat(self,seed=42):
         self.rotmat=Rotation.random(random_state=seed).as_matrix()
 
-    def _gen_single_wavelength_image(self,wavelength=None):
-        if wavelength is None:
-            wavelength=self.wavelengths[0]
+
+    def _gen_single_wavelength_image(self, wavelength=1.0725):
+
+        if self.pdb_file is None:
+            raise ValueError("No pdb file defined.")
+
         F = utils.get_complex_fcalc_from_pdb(self.pdb_file).as_amplitude_array()
+
+        # Detector and beam setup
         dxtbx_det = SimData.simple_detector(
             detector_distance_mm=self.detector_distance_mm,
             pixelsize_mm=self.pixelsize_mm,
-            image_shape=self.image_shape)
+            image_shape=self.image_shape,
+        )
         dxtbx_beam = BeamFactory.simple(wavelength=wavelength)
+
+        # Crystal setup
         uc = F.crystal_symmetry().unit_cell()
-        B = np.reshape(uc.orthogonalization_matrix(), (3,3))
+        B = np.reshape(uc.orthogonalization_matrix(), (3, 3))
         a, b, c = B.T
         sym = F.crystal_symmetry().space_group().type().lookup_symbol()
         dxtbx_cryst = Crystal(a, b, c, sym)
+
         cryst = NBcrystal()
-        cryst.Ncells_abc=self.Ncells_abc
+        cryst.Ncells_abc = self.Ncells_abc
         cryst.dxtbx_crystal = dxtbx_cryst
         cryst.miller_array = F
+
+        # Beam configuration
         beam = NBbeam()
-        beam.polarization_fraction=self.polarization_fraction
+        beam.polarization_fraction = self.polarization_fraction
         beam.size_mm = self.beam_size_mm
-        beam.unit_s0 = dxtbx_beam.get_unit_s0() # 1, 0, 0  forward beam direction
-        beam.spectrum = [(dxtbx_beam.get_wavelength(), 1.0e16)]
+        beam.unit_s0 = dxtbx_beam.get_unit_s0()
+        beam.spectrum = [(dxtbx_beam.get_wavelength(), self.flux)]
+
+        # Simulation
         S = SimData()
         S.detector = dxtbx_det
         S.crystal = cryst
         S.beam = beam
         S.instantiate_nanoBragg()
-        new_U = tuple(self.rotmat.ravel())
+
+        # Orientation and image generation
         S.D.raw_pixels *= 0
-        dxtbx_cryst.set_U(new_U)
+        dxtbx_cryst.set_U(tuple(self.rotmat.ravel()))
         S.D.Amatrix = sqr(dxtbx_cryst.get_A()).transpose()
         S.D.add_nanoBragg_spots()
-        img2 = S.D.raw_pixels.as_numpy_array()
-        return img2
+
+        # Transpose the matrix for storing
+        result = S.D.raw_pixels.as_numpy_array().T
+
+        return result
+
 
     def _gen_multi_wavelength_image(self):
         cnt=0
@@ -222,8 +313,7 @@ class SimFrame:
                 img=self._gen_single_wavelength_image(wavelength=self.wavelengths[cnt])
             else:
                 img+=self._gen_single_wavelength_image(wavelength=self.wavelengths[cnt])
-        self.img=img
-
+        self.img=img / len(self.wavelengths)
 
 
 def _generate_frame(args):
@@ -239,14 +329,15 @@ def gen_chunks(crystal_template, chunksize, seed_start=0, dtype=np.int32, nthrea
     """Parallel version of gen_chunks."""
     seeds = [seed_start + i for i in range(chunksize)]
     args = [(crystal_template, seed) for seed in seeds]
-
     with mp.Pool(processes=nthreads) as pool:
         results = pool.map(_generate_frame, args)
-
     frames, rotmats = zip(*results)
-    frames = np.stack(frames).astype(dtype)
+    frames = safe_cast(
+        array=frames,
+        dtype=dtype,
+        verbose=True,
+    )
     rotmats = np.stack(rotmats).astype(np.float32)
-
     return frames, rotmats
 
 
@@ -260,6 +351,9 @@ def gen_and_save_frames(
         seed_start=0,
         nthreads=10,
     ):
+
+    logger = logging.getLogger(__name__)
+
     p=copy.deepcopy(crystal_template)
     if update_params:
         logger.info(f"Updating the following parameters:\n{update_params}")
@@ -269,20 +363,20 @@ def gen_and_save_frames(
         w.attrs["creator"] = "LIMA"
         w.attrs["default"] = "entry_0000"
         logger.info(f"number_of_frames: {nframes}")
-        logger.info(f"frame_shape: ({p.image_shape[1]},{p.image_shape[0]})")
+        logger.info(f"frame_shape: {p.image_shape}")
         logger.info(f"dtype: {dtype}")
 
         output_data = w.create_dataset(
             "/entry_0000/measurement/data",
-            shape=(nframes,)+(p.image_shape[1],p.image_shape[0]),
+            shape=(nframes,)+(p.image_shape),
             dtype=dtype,
-            chunks=(1,)+(p.image_shape[1],p.image_shape[0]),
+            chunks=(1,)+(p.image_shape),
             compression=hdf5plugin.Bitshuffle(),
         )
 
         rotmats=np.zeros(shape=(nframes,)+(3,3),dtype=np.float32)
         for i in range(0,nframes//chunksize):
-            logger.info(f"writing frames {i*chunksize+1:>5d}-{(i+1)*chunksize:>5d}")
+            logger.info(f"Generating frames {i*chunksize+1:>5d}-{(i+1)*chunksize:>5d}")
             frames,rotmats_chunk=gen_chunks(
                 crystal_template=p,
                 chunksize=chunksize,
@@ -290,6 +384,11 @@ def gen_and_save_frames(
                 dtype=dtype,
                 nthreads=nthreads,
             )
+            # check size of frames
+            size_bytes = frames.nbytes
+            size_mb = size_bytes / (1024 ** 2)
+            size_gb = size_bytes / (1024 ** 3)
+            logger.info(f"Frames ready, memory usage: {size_mb:.2f} MB ({size_gb:.3f} GB)")
             for idx, (frame,rotmat) in enumerate(zip(frames,rotmats_chunk),start=i*chunksize):
                 output_data[idx] = (frame).astype(dtype)
                 rotmats[idx] = rotmat
@@ -313,16 +412,21 @@ def gen_and_save_frames(
         )
         logger.info("Done")
 
+    file_size_bytes = os.path.getsize(h5_file)
+    file_size_mb = file_size_bytes / (1024 ** 2)
+    file_size_gb = file_size_bytes / (1024 ** 3)
+    logger.info(f"File '{h5_file}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
 
-if __name__=="__main__":
-    global logger
-    logger = setup_logging(
-        "h5_generation.log",
-        log_level=logging.INFO,
-        overwrite_log=True
-    )
 
+def main():
     args=parse_args()
+
+    # global logger
+    logger = setup_logging(
+        log_path=args.logfile,
+        log_level=logging.INFO,
+        overwrite_log=True,
+    )
 
     crystal=SimFrame()
 
@@ -330,7 +434,11 @@ if __name__=="__main__":
     logger.info(f"Creating file: {args.h5_file}")
     logger.info(f"First random seed: {args.seed_start}")
 
-    update_params={"Ncells_abc":(4,3,3)}
+    update_params={
+        "pdb_file":"MYO-spars_refine_064_full.pdb",
+        "Ncells_abc":(100,100,25),
+        "wavelengths":[1.0779, 1.0747, 1.0725, 1.0704, 1.0672],
+    }
 
     gen_and_save_frames(
         h5_file=args.h5_file,
@@ -341,3 +449,8 @@ if __name__=="__main__":
         seed_start=args.seed_start,
         nthreads=args.nthreads,
     )
+
+
+if __name__=="__main__":
+    main()
+    

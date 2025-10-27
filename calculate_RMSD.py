@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-
 import sys
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-# import time
 
 
 def align_molecule(mobile, target):
@@ -11,7 +9,8 @@ def align_molecule(mobile, target):
     mobile_origin = np.average(mobile, axis=0)
     temp_target = np.copy(target)-target_origin
     temp_mobile = np.copy(mobile)-mobile_origin
-    rot, rssd = R.align_vectors(
+    # we don't need rssd
+    rot, _ = R.align_vectors(
         temp_target, temp_mobile, return_sensitivity=False)
     newcoords = rot.apply(temp_mobile)+target_origin
     return newcoords
@@ -118,9 +117,9 @@ def calculate_RMSD_per_residue(reference_geom, analyzed_geom):
 if __name__ == "__main__":
 
     if len(sys.argv) < 3:
-        print("Usage: {} [reference_filename] [analyzed_filename]".format(
-            sys.argv[0]))
+        print(f"Usage: {sys.argv[0]} [reference_filename] [analyzed_filename]")
         quit()
+    
     reference_filename = sys.argv[1]
     analyzed_filename = sys.argv[2]
 
