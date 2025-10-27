@@ -132,13 +132,13 @@ def get_selected_hits(pattern, Nsamples=None, rseed=42, Nmax=None, hitfile=None,
         logging.info("Collecting hits")
         all_hits = []
         for filename in filenames:
-            with h5.File(filename, "r") as h5file:
-                dset_path = "/entry_0000/measurement/data"
-                ishit_path = "/entry_0000/processing/peakfinder/isHit"
-                for i in range(len(h5file[dset_path])):
-                    if onlyhits == False:
-                        all_hits.append("%s //%d\n" % (filename, i))
-                    if onlyhits == True:
+            if onlyhits == False:
+                all_hits.append("%s\n" % (filename))
+            if onlyhits == True:
+                with h5.File(filename, "r") as h5file:
+                    dset_path = "/entry_0000/measurement/data"
+                    ishit_path = "/entry_0000/processing/peakfinder/isHit"
+                    for i in range(len(h5file[dset_path])):
                         if h5file[ishit_path][i] == 1:
                             all_hits.append("%s //%d\n" % (filename, i))
         return all_hits
