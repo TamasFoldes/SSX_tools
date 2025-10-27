@@ -11,5 +11,6 @@
 module purge
 module load crystfel
 
+chmod +x ./indexamajig_python.py
 ./indexamajig_python.py
 
