@@ -1,6 +1,7 @@
 import numpy as np
 import h5py as h5
 import hdf5plugin
+hdf5plugin.register()
 from pathlib import Path
 import copy
 import logging
@@ -8,20 +9,58 @@ import multiprocessing as mp
 import argparse
 import os
 import sys
+
 from scipy.spatial.transform import Rotation
 
 from dxtbx.model import Crystal
 from dxtbx.model.beam import BeamFactory
 from scitbx.matrix import sqr
-# from simtbx import nanoBragg
-# from simtbx.nanoBragg.sim_data import Amatrix_dials2nanoBragg
+from simtbx import nanoBragg
 from simtbx.nanoBragg.sim_data import SimData
 from simtbx.nanoBragg.nanoBragg_beam import NBbeam
 from simtbx.nanoBragg.nanoBragg_crystal import NBcrystal
 from simtbx.diffBragg import utils
 
-cuda = False
-hdf5plugin.register()
+
+def main():
+    args=parse_args()
+
+    # global logger
+    logger = setup_logging(
+        log_path=args.logfile,
+        log_level=logging.INFO,
+        overwrite_log=True,
+    )
+
+    crystal=SimFrame()
+
+    logger.info(f"Generating {args.nframes} images as chunks of {args.chunksize}")
+    logger.info(f"Creating file: {args.h5_file}")
+    logger.info(f"First random seed: {args.seed_start}")
+
+    wavelengths, wavelength_weights = crystal._get_gaussian_weights(
+        fwhm=0.01,
+        center=1.0725,
+        N=7,
+    )
+
+    update_params={
+        "pdb_file":"MYO-spars_refine_064_full.pdb",
+        "Ncells_abc":(100,100,25),
+        "wavelengths":wavelengths,
+        "wavelength_weights":wavelength_weights,
+        "beam_size_mm":0.0005,
+    }
+
+    gen_and_save_frames(
+        h5_file=args.h5_file,
+        crystal_template=crystal,
+        nframes=args.nframes,
+        chunksize=args.chunksize,
+        update_params=update_params,
+        seed_start=args.seed_start,
+        nthreads=args.nthreads,
+    )
 
 
 def parse_args():
@@ -223,6 +262,7 @@ class SimFrame:
     def __init__(self):
         self.pdb_file=None
         self.wavelengths=[1.0725]
+        self.wavelength_weights=None
         self.Ncells_abc=(3,3,3)
         self.pixelsize_mm=0.075
         self.detector_distance_mm=100
@@ -231,8 +271,18 @@ class SimFrame:
         self.rotmat=np.eye(3).astype(np.float32)
         self.img=None
         self.polarization_fraction=0.99
-        self.beam_size_mm=0.0005
-        self.flux=2.0e11
+        self.beam_size_mm=2.83/1000
+        self.flux=2.0e11 # photons per pulse
+        self.use_cuda=False
+
+
+    def _get_gaussian_weights(self, fwhm, N, center):
+        sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
+        x_points=np.linspace(-2.5*sigma,2.5*sigma,N)
+        y_points = np.exp(-0.5 * (x_points / sigma) ** 2)
+        wavelengths = x_points+center
+        wavelength_weights = y_points
+        return wavelengths, wavelength_weights
 
 
     def _update_params(self, params: dict, *, allow_new: bool = False) -> None:
@@ -298,7 +348,11 @@ class SimFrame:
         S.D.raw_pixels *= 0
         dxtbx_cryst.set_U(tuple(self.rotmat.ravel()))
         S.D.Amatrix = sqr(dxtbx_cryst.get_A()).transpose()
-        S.D.add_nanoBragg_spots()
+
+        if self.use_cuda:
+            S.D.add_nanoBragg_spots_cuda()
+        else:
+            S.D.add_nanoBragg_spots()
 
         # Transpose the matrix for storing
         result = S.D.raw_pixels.as_numpy_array().T
@@ -306,14 +360,16 @@ class SimFrame:
         return result
 
 
-    def _gen_multi_wavelength_image(self):
-        cnt=0
-        for cnt in range(len(self.wavelengths)):
+    def _gen_multi_wavelength_image(self, weights=None):
+        if weights is None:
+            weights = np.full(shape=len(self.wavelengths), fill_value=1.0)
+        for cnt, (wavelength,weight) in enumerate(zip(self.wavelengths,weights)):
+            tmp=self._gen_single_wavelength_image(wavelength=wavelength)
             if cnt==0: 
-                img=self._gen_single_wavelength_image(wavelength=self.wavelengths[cnt])
+                img=tmp * weight
             else:
-                img+=self._gen_single_wavelength_image(wavelength=self.wavelengths[cnt])
-        self.img=img / len(self.wavelengths)
+                img+=tmp * weight
+        self.img=img
 
 
 def _generate_frame(args):
@@ -321,7 +377,7 @@ def _generate_frame(args):
     crystal_template, seed = args
     p = copy.deepcopy(crystal_template)
     p._random_rotmat(seed=seed)
-    p._gen_multi_wavelength_image()
+    p._gen_multi_wavelength_image(weights=p.wavelength_weights)
     return p.img, p.rotmat
 
 
@@ -400,7 +456,7 @@ def gen_and_save_frames(
             data=rotmats,
             dtype=np.float32,
             chunks=(1,3,3),
-            compression=hdf5plugin.Bitshuffle()
+            compression=hdf5plugin.Bitshuffle(),
         )
 
         logger.info("Storing ishit labels.")
@@ -416,39 +472,6 @@ def gen_and_save_frames(
     file_size_mb = file_size_bytes / (1024 ** 2)
     file_size_gb = file_size_bytes / (1024 ** 3)
     logger.info(f"File '{h5_file}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
-
-
-def main():
-    args=parse_args()
-
-    # global logger
-    logger = setup_logging(
-        log_path=args.logfile,
-        log_level=logging.INFO,
-        overwrite_log=True,
-    )
-
-    crystal=SimFrame()
-
-    logger.info(f"Generating {args.nframes} images as chunks of {args.chunksize}")
-    logger.info(f"Creating file: {args.h5_file}")
-    logger.info(f"First random seed: {args.seed_start}")
-
-    update_params={
-        "pdb_file":"MYO-spars_refine_064_full.pdb",
-        "Ncells_abc":(100,100,25),
-        "wavelengths":[1.0779, 1.0747, 1.0725, 1.0704, 1.0672],
-    }
-
-    gen_and_save_frames(
-        h5_file=args.h5_file,
-        crystal_template=crystal,
-        nframes=args.nframes,
-        chunksize=args.chunksize,
-        update_params=update_params,
-        seed_start=args.seed_start,
-        nthreads=args.nthreads,
-    )
 
 
 if __name__=="__main__":

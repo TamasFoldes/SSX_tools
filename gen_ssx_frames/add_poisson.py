@@ -3,10 +3,34 @@ import h5py as h5
 import hdf5plugin
 hdf5plugin.register()
 from pathlib import Path
+import copy
 import logging
 import argparse
 import os
 import sys
+
+
+def main():
+    args=parse_args()
+    
+    logger = setup_logging(
+        log_path=args.logfile,
+        log_level=logging.INFO,
+        overwrite_log=True,
+    )
+
+    logger.info(f"Adding Poisson noise to file {args.input}")
+    logger.info(f"Noise level (lambda): {args.noise}")
+    logger.info(f"Noisy data will be saved in {args.output}")
+
+    add_poission_noise(
+        inputfile=args.input,
+        outputfile=args.output,
+        lam=args.noise,
+        seed_start=args.seed_start,
+        chunksize=args.chunksize,
+    )
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -141,7 +165,7 @@ def setup_logging(log_path, log_level=logging.INFO, overwrite_log=False):
     return logger
 
 
-def read_write_data(inputfile,outputfile,lam,seed_start,chunksize):
+def add_poission_noise(inputfile,outputfile,lam,seed_start,chunksize):
 
     def _get_data_shape(filename):
         dset_path = "/entry_0000/measurement/data"
@@ -240,28 +264,6 @@ def read_write_data(inputfile,outputfile,lam,seed_start,chunksize):
     file_size_mb = file_size_bytes / (1024 ** 2)
     file_size_gb = file_size_bytes / (1024 ** 3)
     logger.info(f"OutputFile '{outputfile}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
-
-
-def main():
-    args=parse_args()
-    
-    logger = setup_logging(
-        log_path=args.logfile,
-        log_level=logging.INFO,
-        overwrite_log=True,
-    )
-
-    logger.info(f"Adding Poisson noise to file {args.input}")
-    logger.info(f"Noise level (lambda): {args.noise}")
-    logger.info(f"Noisy data will be saved in {args.output}")
-
-    read_write_data(
-        inputfile=args.input,
-        outputfile=args.output,
-        lam=args.noise,
-        seed_start=args.seed_start,
-        chunksize=args.chunksize,
-    )
 
 
 if __name__=="__main__":
