@@ -32,7 +32,7 @@ for ((i=0; i<niter; i++)); do
     cat >${sbatch_file} <<EOF
 #!/bin/bash
 #SBATCH --job-name=${jobname}
-#SBATCH --partition=nice,mx
+#SBATCH --partition=mx-low
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=${nthreads}
 #SBATCH --time 3:00:00
