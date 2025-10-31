@@ -1,29 +1,27 @@
+from simtbx.diffBragg import utils
+from simtbx.nanoBragg.nanoBragg_crystal import NBcrystal
+from simtbx.nanoBragg.nanoBragg_beam import NBbeam
+from simtbx.nanoBragg.sim_data import SimData
+from simtbx import nanoBragg
+from scitbx.matrix import sqr
+from dxtbx.model.beam import BeamFactory
+from dxtbx.model import Crystal
+from scipy.spatial.transform import Rotation
+import sys
+import os
+import argparse
+import multiprocessing as mp
+import logging
+import copy
+from pathlib import Path
 import numpy as np
 import h5py as h5
 import hdf5plugin
 hdf5plugin.register()
-from pathlib import Path
-import copy
-import logging
-import multiprocessing as mp
-import argparse
-import os
-import sys
-
-from scipy.spatial.transform import Rotation
-
-from dxtbx.model import Crystal
-from dxtbx.model.beam import BeamFactory
-from scitbx.matrix import sqr
-from simtbx import nanoBragg
-from simtbx.nanoBragg.sim_data import SimData
-from simtbx.nanoBragg.nanoBragg_beam import NBbeam
-from simtbx.nanoBragg.nanoBragg_crystal import NBcrystal
-from simtbx.diffBragg import utils
 
 
 def main():
-    args=parse_args()
+    args = parse_args()
 
     # global logger
     logger = setup_logging(
@@ -32,9 +30,10 @@ def main():
         overwrite_log=True,
     )
 
-    crystal=SimFrame()
+    crystal = SimFrame()
 
-    logger.info(f"Generating {args.nframes} images as chunks of {args.chunksize}")
+    logger.info(
+        f"Generating {args.nframes} images as chunks of {args.chunksize}")
     logger.info(f"Creating file: {args.h5_file}")
     logger.info(f"First random seed: {args.seed_start}")
 
@@ -44,12 +43,12 @@ def main():
         N=7,
     )
 
-    update_params={
-        "pdb_file":"MYO-spars_refine_064_full.pdb",
-        "Ncells_abc":(100,100,25),
-        "wavelengths":wavelengths,
-        "wavelength_weights":wavelength_weights,
-        "beam_size_mm":0.0005,
+    update_params = {
+        "pdb_file": "MYO-spars_refine_064_full.pdb",
+        "Ncells_abc": (100, 100, 25),
+        "wavelengths": wavelengths,
+        "wavelength_weights": wavelength_weights,
+        "beam_size_mm": 0.0005,
     }
 
     gen_and_save_frames(
@@ -123,7 +122,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "-l","--logfile",
+        "-l", "--logfile",
         type=str,
         default="h5_generation.log",
         help="Name of the logfile. (default: %(default)s)"
@@ -145,12 +144,14 @@ def parse_args():
 
     # Check file existence
     if os.path.exists(args.h5_file) and not args.force:
-        errors.append(f"Output file '{args.h5_file}' already exists. Use --force to overwrite.")
+        errors.append(
+            f"Output file '{args.h5_file}' already exists. Use --force to overwrite.")
 
     if errors:
         # for e in errors:
         #     logger.error(e)
-        raise ValueError("Invalid command-line arguments:\n" + "\n".join(errors))
+        raise ValueError(
+            "Invalid command-line arguments:\n" + "\n".join(errors))
 
     return args
 
@@ -184,7 +185,8 @@ def setup_logging(log_path, log_level=logging.INFO, overwrite_log=False):
                 break
 
     if not existing_handler:
-        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        file_handler = logging.FileHandler(
+            log_path, mode="a", encoding="utf-8")
         fmt = logging.Formatter(
             "[%(asctime)s.%(msecs)03d] - %(levelname)-8s - %(message)s",
             datefmt="%Y-%b-%d %H:%M:%S",
@@ -196,94 +198,93 @@ def setup_logging(log_path, log_level=logging.INFO, overwrite_log=False):
 
 
 def safe_cast(array: np.ndarray, dtype: np.dtype, verbose: bool = False) -> np.ndarray:
-        """
-        Safely cast a NumPy array to a specified dtype.
-        Clips values to the valid range of the dtype to avoid infs or overflows.
-        Optionally prints out any values that were changed.
+    """
+    Safely cast a NumPy array to a specified dtype.
+    Clips values to the valid range of the dtype to avoid infs or overflows.
+    Optionally prints out any values that were changed.
 
-        Parameters
-        ----------
-        array : np.ndarray
-            Input array to be converted.
-        dtype : np.dtype or type
-            Target data type (e.g., np.uint8, np.int16, np.float32).
-        verbose : bool, optional
-            If True, prints when values are clipped or replaced. Default is False.
+    Parameters
+    ----------
+    array : np.ndarray
+        Input array to be converted.
+    dtype : np.dtype or type
+        Target data type (e.g., np.uint8, np.int16, np.float32).
+    verbose : bool, optional
+        If True, prints when values are clipped or replaced. Default is False.
 
-        Returns
-        -------
-        np.ndarray
-            Array safely cast to the specified dtype.
-        """
-        logger = logging.getLogger(__name__)
-        dtype = np.dtype(dtype)
+    Returns
+    -------
+    np.ndarray
+        Array safely cast to the specified dtype.
+    """
+    logger = logging.getLogger(__name__)
+    dtype = np.dtype(dtype)
 
-        # Keep original for comparison
-        original = np.copy(array)
+    # Keep original for comparison
+    original = np.copy(array)
 
-        # Replace NaN and infinities with large/small finite numbers
-        array = np.nan_to_num(array, nan=0.0, posinf=np.inf, neginf=-np.inf)
+    # Replace NaN and infinities with large/small finite numbers
+    array = np.nan_to_num(array, nan=0.0, posinf=np.inf, neginf=-np.inf)
 
-        # Clip to dtype range if needed
-        if np.issubdtype(dtype, np.integer):
-            info = np.iinfo(dtype)
-            min_val, max_val = info.min, info.max
-        elif np.issubdtype(dtype, np.floating):
-            info = np.finfo(dtype)
-            min_val, max_val = info.min, info.max
-        else:
-            raise TypeError(f"Unsupported dtype: {dtype}")
+    # Clip to dtype range if needed
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        min_val, max_val = info.min, info.max
+    elif np.issubdtype(dtype, np.floating):
+        info = np.finfo(dtype)
+        min_val, max_val = info.min, info.max
+    else:
+        raise TypeError(f"Unsupported dtype: {dtype}")
 
-        # Identify out-of-range elements
-        mask_low = array < min_val
-        mask_high = array > max_val
-        mask_invalid = ~np.isfinite(original)
+    # Identify out-of-range elements
+    mask_low = array < min_val
+    mask_high = array > max_val
+    mask_invalid = ~np.isfinite(original)
 
-        if verbose and (mask_low.any() or mask_high.any() or mask_invalid.any()):
-            indices = np.where(mask_low | mask_high | mask_invalid)
-            for i in zip(*indices):
-                old_val = original[i]
-                new_val = (
-                    min_val if mask_low[i]
-                    else max_val if mask_high[i]
-                    else 0.0 if mask_invalid[i]
-                    else array[i]
-                )
-                # print(f"Value {old_val} at index {i} clipped to {new_val}")
-                logger.warning(f"Value {old_val} at index {i} clipped to {new_val}")
+    if verbose and (mask_low.any() or mask_high.any() or mask_invalid.any()):
+        indices = np.where(mask_low | mask_high | mask_invalid)
+        for i in zip(*indices):
+            old_val = original[i]
+            new_val = (
+                min_val if mask_low[i]
+                else max_val if mask_high[i]
+                else 0.0 if mask_invalid[i]
+                else array[i]
+            )
+            # print(f"Value {old_val} at index {i} clipped to {new_val}")
+            logger.warning(
+                f"Value {old_val} at index {i} clipped to {new_val}")
 
-        # Apply clipping
-        array = np.clip(array, min_val, max_val)
+    # Apply clipping
+    array = np.clip(array, min_val, max_val)
 
-        return array.astype(dtype)
+    return array.astype(dtype)
 
 
 class SimFrame:
     def __init__(self):
-        self.pdb_file=None
-        self.wavelengths=[1.0725]
-        self.wavelength_weights=None
-        self.Ncells_abc=(3,3,3)
-        self.pixelsize_mm=0.075
-        self.detector_distance_mm=100
-        self.pixelsize_mm=0.075
-        self.image_shape=(2164,2068)
-        self.rotmat=np.eye(3).astype(np.float32)
-        self.img=None
-        self.polarization_fraction=0.99
-        self.beam_size_mm=2.83/1000
-        self.flux=2.0e11 # photons per pulse
-        self.use_cuda=False
-
+        self.pdb_file = None
+        self.wavelengths = [1.0725]
+        self.wavelength_weights = None
+        self.Ncells_abc = (3, 3, 3)
+        self.pixelsize_mm = 0.075
+        self.detector_distance_mm = 100
+        self.pixelsize_mm = 0.075
+        self.image_shape = (2164, 2068)
+        self.rotmat = np.eye(3).astype(np.float32)
+        self.img = None
+        self.polarization_fraction = 0.99
+        self.beam_size_mm = 2.83/1000  # approximate ID29 beam size (4x2 um)
+        self.flux = 2.0e11  # photons per pulse
+        self.use_cuda = False
 
     def _get_gaussian_weights(self, fwhm, N, center):
         sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
-        x_points=np.linspace(-2.5*sigma,2.5*sigma,N)
+        x_points = np.linspace(-2.5*sigma, 2.5*sigma, N)
         y_points = np.exp(-0.5 * (x_points / sigma) ** 2)
         wavelengths = x_points+center
         wavelength_weights = y_points
         return wavelengths, wavelength_weights
-
 
     def _update_params(self, params: dict, *, allow_new: bool = False) -> None:
         """
@@ -298,17 +299,16 @@ class SimFrame:
             if hasattr(self, key) or allow_new:
                 setattr(self, key, value)
 
-
-    def _random_rotmat(self,seed=42):
-        self.rotmat=Rotation.random(random_state=seed).as_matrix()
-
+    def _random_rotmat(self, seed=42):
+        self.rotmat = Rotation.random(random_state=seed).as_matrix()
 
     def _gen_single_wavelength_image(self, wavelength=1.0725):
 
         if self.pdb_file is None:
             raise ValueError("No pdb file defined.")
 
-        F = utils.get_complex_fcalc_from_pdb(self.pdb_file).as_amplitude_array()
+        F = utils.get_complex_fcalc_from_pdb(
+            self.pdb_file).as_amplitude_array()
 
         # Detector and beam setup
         dxtbx_det = SimData.simple_detector(
@@ -359,17 +359,16 @@ class SimFrame:
 
         return result
 
-
     def _gen_multi_wavelength_image(self, weights=None):
         if weights is None:
             weights = np.full(shape=len(self.wavelengths), fill_value=1.0)
-        for cnt, (wavelength,weight) in enumerate(zip(self.wavelengths,weights)):
-            tmp=self._gen_single_wavelength_image(wavelength=wavelength)
-            if cnt==0: 
-                img=tmp * weight
+        for cnt, (wavelength, weight) in enumerate(zip(self.wavelengths, weights)):
+            tmp = self._gen_single_wavelength_image(wavelength=wavelength)
+            if cnt == 0:
+                img = tmp * weight
             else:
-                img+=tmp * weight
-        self.img=img
+                img += tmp * weight
+        self.img = img
 
 
 def _generate_frame(args):
@@ -398,19 +397,19 @@ def gen_chunks(crystal_template, chunksize, seed_start=0, dtype=np.int32, nthrea
 
 
 def gen_and_save_frames(
-        h5_file,
-        crystal_template,
-        nframes,
-        chunksize,
-        update_params=None,
-        dtype=np.int32,
-        seed_start=0,
-        nthreads=10,
-    ):
+    h5_file,
+    crystal_template,
+    nframes,
+    chunksize,
+    update_params=None,
+    dtype=np.int32,
+    seed_start=0,
+    nthreads=10,
+):
 
     logger = logging.getLogger(__name__)
 
-    p=copy.deepcopy(crystal_template)
+    p = copy.deepcopy(crystal_template)
     if update_params:
         logger.info(f"Updating the following parameters:\n{update_params}")
         p._update_params(update_params)
@@ -430,10 +429,11 @@ def gen_and_save_frames(
             compression=hdf5plugin.Bitshuffle(),
         )
 
-        rotmats=np.zeros(shape=(nframes,)+(3,3),dtype=np.float32)
-        for i in range(0,nframes//chunksize):
-            logger.info(f"Generating frames {i*chunksize+1:>5d}-{(i+1)*chunksize:>5d}")
-            frames,rotmats_chunk=gen_chunks(
+        rotmats = np.zeros(shape=(nframes,)+(3, 3), dtype=np.float32)
+        for i in range(0, nframes//chunksize):
+            logger.info(
+                f"Generating frames {i*chunksize+1:>5d}-{(i+1)*chunksize:>5d}")
+            frames, rotmats_chunk = gen_chunks(
                 crystal_template=p,
                 chunksize=chunksize,
                 seed_start=i*chunksize+seed_start,
@@ -444,18 +444,19 @@ def gen_and_save_frames(
             size_bytes = frames.nbytes
             size_mb = size_bytes / (1024 ** 2)
             size_gb = size_bytes / (1024 ** 3)
-            logger.info(f"Frames ready, memory usage: {size_mb:.2f} MB ({size_gb:.3f} GB)")
-            for idx, (frame,rotmat) in enumerate(zip(frames,rotmats_chunk),start=i*chunksize):
+            logger.info(
+                f"Frames ready, memory usage: {size_mb:.2f} MB ({size_gb:.3f} GB)")
+            for idx, (frame, rotmat) in enumerate(zip(frames, rotmats_chunk), start=i*chunksize):
                 output_data[idx] = (frame).astype(dtype)
                 rotmats[idx] = rotmat
-        
+
     with h5.File(h5_file, "a") as f:
         logger.info("Storing rotmats.")
         _ = f.create_dataset(
             "/entry_0000/processing/rotmats",
             data=rotmats,
             dtype=np.float32,
-            chunks=(1,3,3),
+            chunks=(1, 3, 3),
             compression=hdf5plugin.Bitshuffle(),
         )
 
@@ -471,9 +472,9 @@ def gen_and_save_frames(
     file_size_bytes = os.path.getsize(h5_file)
     file_size_mb = file_size_bytes / (1024 ** 2)
     file_size_gb = file_size_bytes / (1024 ** 3)
-    logger.info(f"File '{h5_file}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
+    logger.info(
+        f"File '{h5_file}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
-    

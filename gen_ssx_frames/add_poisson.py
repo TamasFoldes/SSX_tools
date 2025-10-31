@@ -1,18 +1,17 @@
+import sys
+import os
+import argparse
+import logging
+from pathlib import Path
 import numpy as np
 import h5py as h5
 import hdf5plugin
 hdf5plugin.register()
-from pathlib import Path
-import copy
-import logging
-import argparse
-import os
-import sys
 
 
 def main():
-    args=parse_args()
-    
+    args = parse_args()
+
     logger = setup_logging(
         log_path=args.logfile,
         log_level=logging.INFO,
@@ -117,7 +116,8 @@ def parse_args():
 
     # Check output file overwrite rule
     if os.path.exists(args.output) and not args.force:
-        errors.append(f"Error: Output file '{args.output}' already exists. Use --force to overwrite it.")
+        errors.append(
+            f"Error: Output file '{args.output}' already exists. Use --force to overwrite it.")
 
     if errors:
         raise ValueError("\n".join(errors))
@@ -154,7 +154,8 @@ def setup_logging(log_path, log_level=logging.INFO, overwrite_log=False):
                 break
 
     if not existing_handler:
-        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        file_handler = logging.FileHandler(
+            log_path, mode="a", encoding="utf-8")
         fmt = logging.Formatter(
             "[%(asctime)s.%(msecs)03d] - %(levelname)-8s - %(message)s",
             datefmt="%Y-%b-%d %H:%M:%S",
@@ -165,7 +166,7 @@ def setup_logging(log_path, log_level=logging.INFO, overwrite_log=False):
     return logger
 
 
-def add_poission_noise(inputfile,outputfile,lam,seed_start,chunksize):
+def add_poission_noise(inputfile, outputfile, lam, seed_start, chunksize):
 
     def _get_data_shape(filename):
         dset_path = "/entry_0000/measurement/data"
@@ -181,10 +182,10 @@ def add_poission_noise(inputfile,outputfile,lam,seed_start,chunksize):
             if frame is None:
                 data = h5file[dset_path][()]
                 return data
-            if isinstance(frame,int):
+            if isinstance(frame, int):
                 data = h5file[dset_path][frame]
                 return data
-            if isinstance(frame,tuple):
+            if isinstance(frame, tuple):
                 data = h5file[dset_path][frame[0]:frame[1]]
                 return data
         return None
@@ -194,15 +195,16 @@ def add_poission_noise(inputfile,outputfile,lam,seed_start,chunksize):
     file_size_bytes = os.path.getsize(inputfile)
     file_size_mb = file_size_bytes / (1024 ** 2)
     file_size_gb = file_size_bytes / (1024 ** 3)
-    logger.info(f"InputFile '{inputfile}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
+    logger.info(
+        f"InputFile '{inputfile}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
 
     with h5.File(inputfile, "r") as h:
-        h5_data_path="/entry_0000/measurement/data"
+        h5_data_path = "/entry_0000/measurement/data"
 
         input_data = h[h5_data_path]
-        data_shape,dtype=_get_data_shape(inputfile)
-        nframes=data_shape[0]
-        frame_shape=data_shape[1:]
+        data_shape, dtype = _get_data_shape(inputfile)
+        nframes = data_shape[0]
+        frame_shape = data_shape[1:]
 
         with h5.File(outputfile, "w") as w:
             w.attrs["creator"] = "LIMA"
@@ -215,39 +217,44 @@ def add_poission_noise(inputfile,outputfile,lam,seed_start,chunksize):
                                            dtype=dtype,
                                            chunks=(1,)+frame_shape,
                                            compression=hdf5plugin.Bitshuffle(),)
-            
-            rotmats=np.zeros(shape=(nframes,)+(3,3),dtype=np.float32)
-            for i in range(0,nframes//chunksize):
-                logger.info(f"Loading frames {i*chunksize+1:>5d}-{(i+1)*chunksize:>5d}")
-                frames = _load_data(inputfile, frame=(i*chunksize, (i+1)*chunksize))
+
+            rotmats = np.zeros(shape=(nframes,)+(3, 3), dtype=np.float32)
+            for i in range(0, nframes//chunksize):
+                logger.info(
+                    f"Loading frames {i*chunksize+1:>5d}-{(i+1)*chunksize:>5d}")
+                frames = _load_data(inputfile, frame=(
+                    i*chunksize, (i+1)*chunksize))
                 # check size of frames
                 size_bytes = frames.nbytes
                 size_mb = size_bytes / (1024 ** 2)
                 size_gb = size_bytes / (1024 ** 3)
-                logger.info(f"Frames loaded,   memory usage: {size_mb:.2f} MB ({size_gb:.3f} GB)")
+                logger.info(
+                    f"Frames loaded,   memory usage: {size_mb:.2f} MB ({size_gb:.3f} GB)")
 
                 np.random.seed(seed_start+i)
-                noise_chunk = np.random.poisson(lam=lam, size=(chunksize,)+frame_shape)
+                noise_chunk = np.random.poisson(
+                    lam=lam, size=(chunksize,)+frame_shape)
 
                 size_bytes = noise_chunk.nbytes
                 size_mb = size_bytes / (1024 ** 2)
                 size_gb = size_bytes / (1024 ** 3)
-                logger.info(f"Noise generated, memory usage: {size_mb:.2f} MB ({size_gb:.3f} GB)")
+                logger.info(
+                    f"Noise generated, memory usage: {size_mb:.2f} MB ({size_gb:.3f} GB)")
 
                 frames = frames + noise_chunk
 
-                for idx, frame in enumerate(frames,start=i*chunksize):
+                for idx, frame in enumerate(frames, start=i*chunksize):
                     output_data[idx] = (frame).astype(dtype)
 
         with h5.File(outputfile, "a") as f:
-            dset_path="/entry_0000/processing/rotmats"
+            dset_path = "/entry_0000/processing/rotmats"
             rotmats = h[dset_path][()]
             logger.info("Storing rotmats.")
             _ = f.create_dataset(
                 dset_path,
                 data=rotmats,
                 dtype=np.float32,
-                chunks=(1,3,3),
+                chunks=(1, 3, 3),
                 compression=hdf5plugin.Bitshuffle(),
             )
 
@@ -263,8 +270,9 @@ def add_poission_noise(inputfile,outputfile,lam,seed_start,chunksize):
     file_size_bytes = os.path.getsize(outputfile)
     file_size_mb = file_size_bytes / (1024 ** 2)
     file_size_gb = file_size_bytes / (1024 ** 3)
-    logger.info(f"OutputFile '{outputfile}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
+    logger.info(
+        f"OutputFile '{outputfile}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
