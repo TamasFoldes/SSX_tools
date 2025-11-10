@@ -1,3 +1,5 @@
+from cctbx import xray
+from iotbx import pdb
 from simtbx.diffBragg import utils
 from simtbx.nanoBragg.nanoBragg_crystal import NBcrystal
 from simtbx.nanoBragg.nanoBragg_beam import NBbeam
@@ -274,8 +276,9 @@ class SimFrame:
         self.rotmat = np.eye(3).astype(np.float32)
         self.img = None
         self.polarization_fraction = 0.99
-        self.beam_size_mm = 2.83/1000  # approximate ID29 beam size (4x2 um)
-        self.flux = 2.0e11  # photons per pulse
+        self.beam_size_mm = 2.83/1000
+        self.flux = 1.0e11  # photons per pulse
+        self.anomalous = True
         self.use_cuda = False
 
     def _get_gaussian_weights(self, fwhm, N, center):
@@ -302,13 +305,37 @@ class SimFrame:
     def _random_rotmat(self, seed=42):
         self.rotmat = Rotation.random(random_state=seed).as_matrix()
 
-    def _gen_single_wavelength_image(self, wavelength=1.0725):
+    # def _gen_structure_factors_old(self):
+    #     F = utils.get_complex_fcalc_from_pdb(self.pdb_file).as_amplitude_array()
+    #     return F
+
+    def _gen_structure_factors_anom(self, wavelength, anomalous_flag=True, d_min=1.0):
+        pdb_inp = pdb.input(self.pdb_file)
+        xrs = pdb_inp.xray_structure_simple()
+
+        if anomalous_flag:
+            # Use wavelength-dependent f′/f″
+            xrs.set_inelastic_form_factors(wavelength, "sasaki")
+            fcalc = xrs.structure_factors(
+                anomalous_flag=True, d_min=d_min).f_calc()
+        else:
+            # Normal scattering (no dispersion corrections)
+            fcalc = xrs.structure_factors(
+                anomalous_flag=False, d_min=d_min).f_calc()
+
+        # <-- convert to amplitudes before passing to nanoBragg
+        F = fcalc.as_amplitude_array()
+        return F
+
+    def _gen_single_wavelength_image(self, wavelength=1.0725, anomalous=True):
 
         if self.pdb_file is None:
             raise ValueError("No pdb file defined.")
 
-        F = utils.get_complex_fcalc_from_pdb(
-            self.pdb_file).as_amplitude_array()
+        F = self._gen_structure_factors_anom(
+            wavelength,
+            anomalous_flag=anomalous,
+        )
 
         # Detector and beam setup
         dxtbx_det = SimData.simple_detector(
@@ -344,6 +371,14 @@ class SimFrame:
         S.beam = beam
         S.instantiate_nanoBragg()
 
+        if anomalous:
+            # Enable anomalous scattering
+            S.D.anomalous_flag = True
+            S.D.wavelength_A = wavelength
+        else:
+            # Disable anomalous scattering
+            S.D.anomalous_flag = False
+
         # Orientation and image generation
         S.D.raw_pixels *= 0
         dxtbx_cryst.set_U(tuple(self.rotmat.ravel()))
@@ -359,11 +394,14 @@ class SimFrame:
 
         return result
 
-    def _gen_multi_wavelength_image(self, weights=None):
+    def _gen_multi_wavelength_image(self, weights=None, anomalous=True):
         if weights is None:
             weights = np.full(shape=len(self.wavelengths), fill_value=1.0)
         for cnt, (wavelength, weight) in enumerate(zip(self.wavelengths, weights)):
-            tmp = self._gen_single_wavelength_image(wavelength=wavelength)
+            tmp = self._gen_single_wavelength_image(
+                wavelength=wavelength,
+                anomalous=anomalous,
+            )
             if cnt == 0:
                 img = tmp * weight
             else:
@@ -376,7 +414,10 @@ def _generate_frame(args):
     crystal_template, seed = args
     p = copy.deepcopy(crystal_template)
     p._random_rotmat(seed=seed)
-    p._gen_multi_wavelength_image(weights=p.wavelength_weights)
+    p._gen_multi_wavelength_image(
+        weights=p.wavelength_weights,
+        anomalous=p.anomalous
+    )
     return p.img, p.rotmat
 
 
@@ -405,75 +446,231 @@ def gen_and_save_frames(
     dtype=np.int32,
     seed_start=0,
     nthreads=10,
+    tmp_dir=None,
 ):
+    """Generate synthetic diffraction frames, cache them in chunks,
+    and merge into one HDF5 file."""
 
     logger = logging.getLogger(__name__)
 
-    p = copy.deepcopy(crystal_template)
-    if update_params:
-        logger.info(f"Updating the following parameters:\n{update_params}")
-        p._update_params(update_params)
+    # --- Helper functions ---
 
-    with h5.File(h5_file, "w") as w:
-        w.attrs["creator"] = "LIMA"
-        w.attrs["default"] = "entry_0000"
-        logger.info(f"number_of_frames: {nframes}")
-        logger.info(f"frame_shape: {p.image_shape}")
-        logger.info(f"dtype: {dtype}")
+    def _get_tmp_dir(h5_file, tmp_dir):
+        """
+        Determine and create the temporary chunk directory.
 
-        output_data = w.create_dataset(
-            "/entry_0000/measurement/data",
-            shape=(nframes,)+(p.image_shape),
+        If tmp_dir is not specified, create a folder in the same directory
+        as the h5_file, named '<h5_file_stem>_tmp'.
+        """
+        h5_path = Path(h5_file)
+        if tmp_dir is None:
+            tmp_dir = h5_path.parent / f"{h5_path.stem}_tmp"
+        else:
+            tmp_dir = Path(tmp_dir)
+
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        return tmp_dir
+
+    def _update_template_params(p, update_params):
+        """Apply optional parameter updates to the crystal template."""
+        if update_params:
+            lines = "\n".join(f"  {k}: {v}" for k, v in update_params.items())
+            logger.info("Updating parameters:\n" + lines)
+            p._update_params(update_params)
+        return p
+
+    def _generate_chunk_file(chunk_idx, start_seed):
+        """Generate one chunk of frames and save as temporary HDF5 file."""
+        chunk_file = Path(tmp_dir) / f"chunk_{chunk_idx:04d}.h5"
+        if chunk_file.exists():
+
+            try:
+                nframes_in_h5 = _get_number_of_frames_in_h5_file(chunk_file)
+                nrotmats_in_h5 = _get_number_of_rotmats_in_h5_file(chunk_file)
+            except:
+                nframes_in_h5 = 0
+                nrotmats_in_h5 = 0
+
+            if nframes_in_h5 == chunksize and nrotmats_in_h5 == chunksize:
+                logger.info(
+                    f"Chunk {chunk_file} already exists, skipping generation.")
+                return chunk_file
+
+        logger.info(
+            f"Generating chunk {chunk_idx}:"
+            f" frames {chunk_idx*chunksize + 1:>4d}"
+            f" – {(chunk_idx+1)*chunksize:>4d}"
+        )
+        frames, rotmats = gen_chunks(
+            crystal_template=p,
+            chunksize=chunksize,
+            seed_start=start_seed,
             dtype=dtype,
-            chunks=(1,)+(p.image_shape),
-            compression=hdf5plugin.Bitshuffle(),
+            nthreads=nthreads,
         )
 
-        rotmats = np.zeros(shape=(nframes,)+(3, 3), dtype=np.float32)
-        for i in range(0, nframes//chunksize):
-            logger.info(
-                f"Generating frames {i*chunksize+1:>5d}-{(i+1)*chunksize:>5d}")
-            frames, rotmats_chunk = gen_chunks(
-                crystal_template=p,
-                chunksize=chunksize,
-                seed_start=i*chunksize+seed_start,
+        size_mb = frames.nbytes / (1024 ** 2)
+        logger.info(f"Chunk {chunk_idx} ready, memory usage: {size_mb:.2f} MB")
+
+        with h5.File(chunk_file, "w") as cf:
+            cf.attrs["creator"] = "LIMA"
+            cf.attrs["default"] = "entry_0000"
+            cf.create_dataset(
+                "/entry_0000/measurement/data",
+                data=frames.astype(dtype),
                 dtype=dtype,
-                nthreads=nthreads,
+                compression=hdf5plugin.Bitshuffle()
             )
-            # check size of frames
-            size_bytes = frames.nbytes
-            size_mb = size_bytes / (1024 ** 2)
-            size_gb = size_bytes / (1024 ** 3)
+            cf.create_dataset(
+                "/entry_0000/processing/rotmats",
+                data=rotmats.astype(np.float32),
+                dtype=np.float32,
+                compression=hdf5plugin.Bitshuffle()
+            )
+        return chunk_file
+
+    def _combine_chunks(output_file, chunk_files):
+        """Combine all chunk files into the final HDF5 output file."""
+        logger.info(f"Combining {len(chunk_files)} chunks into {output_file}")
+        with h5.File(output_file, "w") as w:
+            w.attrs["creator"] = "LIMA"
+            w.attrs["default"] = "entry_0000"
+
+            # Determine shape from the first chunk
+            with h5.File(chunk_files[0], "r") as cf:
+                n_chunk, * \
+                    frame_shape = cf["/entry_0000/measurement/data"].shape
+                dtype_local = cf["/entry_0000/measurement/data"].dtype
+
+            total_frames = len(chunk_files) * n_chunk
+            output_data = w.create_dataset(
+                "/entry_0000/measurement/data",
+                shape=(total_frames,) + tuple(frame_shape),
+                dtype=dtype_local,
+                chunks=(1,) + tuple(frame_shape),
+                compression=hdf5plugin.Bitshuffle(),
+            )
+            rotmats_data = np.zeros((total_frames, 3, 3), dtype=np.float32)
+
+            # Fill combined dataset
+            idx = 0
+            for chunk_file in chunk_files:
+                with h5.File(chunk_file, "r") as cf:
+                    frames = cf["/entry_0000/measurement/data"][()]
+                    rotmats = cf["/entry_0000/processing/rotmats"][()]
+                    n_chunk = frames.shape[0]
+                    output_data[idx:idx+n_chunk] = frames
+                    rotmats_data[idx:idx+n_chunk] = rotmats
+                    idx += n_chunk
+
+            # Add rotmats and isHit labels
+            w.create_dataset(
+                "/entry_0000/processing/rotmats",
+                data=rotmats_data,
+                dtype=np.float32,
+                chunks=(1, 3, 3),
+                compression=hdf5plugin.Bitshuffle(),
+            )
+            w.create_dataset(
+                "/entry_0000/processing/peakfinder/isHit",
+                data=np.full(total_frames, 1, dtype=np.uint8),
+                dtype=np.uint8,
+                compression=hdf5plugin.Bitshuffle(),
+            )
+
+        logger.info("Merging complete.")
+        return output_file
+
+    def _get_number_of_frames_in_h5_file(filename):
+        dset_path = "/entry_0000/measurement/data"
+        with h5.File(filename, "r") as h5file:
+            dset = h5file[dset_path]
+            shape = dset.shape
+        return shape[0]
+
+    def _get_number_of_rotmats_in_h5_file(filename):
+        dset_path = "/entry_0000/processing/rotmats"
+        with h5.File(filename, "r") as h5file:
+            dset = h5file[dset_path]
+            shape = dset.shape
+        return shape[0]
+
+    def _cleanup_tmp_files(h5_file, tmp_dir):
+        """
+        Remove all temporary files in tmp_dir and then remove the directory itself.
+        Uses pathlib only (no shutil).
+        """
+        logger = logging.getLogger(__name__)
+        logger.info(f"Cleaning up temporary directory: {tmp_dir}")
+
+        h5_file_path = Path(h5_file)
+        if not h5_file_path.is_file():
+            logger.warning(f"No h5 file found: {h5_file}")
+            return
+
+        try:
+            nframes_in_h5 = _get_number_of_frames_in_h5_file(h5_file)
+            nrotmats_in_h5 = _get_number_of_rotmats_in_h5_file(h5_file)
+        except:
+            logger.warning(f"HDF5 file {h5_file} seems corrupted.")
+            return
+        if nframes_in_h5 != nframes or nrotmats_in_h5 != nframes:
+            logger.warning(f"HDF5 file {h5_file} is incomplete.")
+            return
+
+        tmp_path = Path(tmp_dir)
+        if not tmp_path.exists():
             logger.info(
-                f"Frames ready, memory usage: {size_mb:.2f} MB ({size_gb:.3f} GB)")
-            for idx, (frame, rotmat) in enumerate(zip(frames, rotmats_chunk), start=i*chunksize):
-                output_data[idx] = (frame).astype(dtype)
-                rotmats[idx] = rotmat
+                "Temporary directory does not exist, skipping cleanup.")
+            return
 
-    with h5.File(h5_file, "a") as f:
-        logger.info("Storing rotmats.")
-        _ = f.create_dataset(
-            "/entry_0000/processing/rotmats",
-            data=rotmats,
-            dtype=np.float32,
-            chunks=(1, 3, 3),
-            compression=hdf5plugin.Bitshuffle(),
-        )
+        try:
+            for child in tmp_path.iterdir():
+                try:
+                    if child.is_file():
+                        child.unlink()
+                        logger.debug(f"Deleted file: {child}")
+                    elif child.is_dir():
+                        # Remove empty subdirectories (shouldn't exist normally)
+                        child.rmdir()
+                        logger.debug(f"Removed subdirectory: {child}")
+                except Exception as e:
+                    logger.warning(f"Could not delete {child}: {e}")
 
-        logger.info("Storing ishit labels.")
-        _ = f.create_dataset(
-            "/entry_0000/processing/peakfinder/isHit",
-            data=np.full(nframes, fill_value=1, dtype=np.uint8),
-            dtype=np.uint8,
-            compression=hdf5plugin.Bitshuffle(),
-        )
-        logger.info("Done")
+            tmp_path.rmdir()
+            logger.info(f"Removed temporary directory: {tmp_path}")
+        except Exception as e:
+            logger.warning(
+                f"Could not remove temporary directory {tmp_dir}: {e}")
 
-    file_size_bytes = os.path.getsize(h5_file)
-    file_size_mb = file_size_bytes / (1024 ** 2)
-    file_size_gb = file_size_bytes / (1024 ** 3)
+        logger.info("Cleanup complete.")
+
+    # --- Main procedure ---
+    tmp_dir = _get_tmp_dir(h5_file, tmp_dir)
+
+    p = copy.deepcopy(crystal_template)
+    p = _update_template_params(p, update_params)
+
+    n_chunks = nframes // chunksize
+    chunk_files = []
+
+    # Generate (or reuse) chunk files
+    for i in range(n_chunks):
+        chunk_file = _generate_chunk_file(
+            i, start_seed=i*chunksize + seed_start)
+        chunk_files.append(chunk_file)
+
+    # Combine chunks
+    final_file = _combine_chunks(h5_file, chunk_files)
+
+    # Log file size
+    size_mb = os.path.getsize(final_file) / (1024 ** 2)
+    size_gb = size_mb / 1024
     logger.info(
-        f"File '{h5_file}' size: {file_size_mb:.2f} MB ({file_size_gb:.3f} GB)")
+        f"Final file '{final_file}' size: {size_mb:.2f} MB ({size_gb:.3f} GB)")
+
+    # Cleanup temporary files
+    _cleanup_tmp_files(h5_file, tmp_dir)
 
 
 if __name__ == "__main__":
