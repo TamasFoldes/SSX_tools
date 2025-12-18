@@ -23,6 +23,10 @@ def main():
     args = parse_arguments()
 
     logger.info(f"Analyzing stream file:\n {args.stream_file}")
+    if args.maxpoints is None:
+        logger.info("Plotting all orientations")
+    else:
+        logger.info(f"Plotting {args.maxpoints} number of points")
 
     rec_latt_vectors = _parse_star_lines_to_array(args.stream_file)
     logger.info(f"Number of crystals found: {np.shape(rec_latt_vectors)[0]}")
@@ -31,7 +35,7 @@ def main():
     logger.info("Vectors converted to Euler angles")
 
     mpl.use("Agg")
-    _combined_plot(euler_angles_list, args.png)
+    _combined_plot(euler_angles_list, args.png, NmaxPoints=args.maxpoints)
     logger.info(f"Plot saved at {args.png}")
 
 
@@ -121,7 +125,16 @@ def parse_arguments():
         help="Do not overwrite output PNG if it already exists"
     )
 
+    parser.add_argument(
+        "--maxpoints",
+        type=int,
+        default=None,
+        help="Maximum number of points to plot from the stream file "
+    )
+
     args = parser.parse_args()
+
+    logger = logging.getLogger(__name__)
 
     # ---- Validation (raise regular exceptions) ----
 
@@ -271,7 +284,7 @@ def _euler_to_rotation_matrix(phi1, Phi, phi2):
     return Rz1 @ Rx @ Rz2
 
 
-def _combined_plot(euler_angles_list, png_filename):
+def _combined_plot(euler_angles_list, png_filename, NmaxPoints=None):
     """
     Visualizes Euler angle histograms and crystal orientation
     projections using Lambert projection.
@@ -381,6 +394,12 @@ def _combined_plot(euler_angles_list, png_filename):
 
     # --- Compute Crystal Directions from Euler Angles ---
 
+    np.random.seed(42)
+    if NmaxPoints is not None:
+        if NmaxPoints < len(euler_angles_list):
+            indices = np.random.choice(euler_angles_list.shape[0], size=NmaxPoints, replace=False)
+            euler_angles_list = euler_angles_list[indices]
+            
     directions = np.eye(3)
     crystal_directions = np.array(
         [
