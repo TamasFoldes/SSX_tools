@@ -23,13 +23,11 @@ def main():
     args = parse_arguments()
 
     logger.info(f"Analyzing stream file:\n {args.stream_file}")
-    if args.maxpoints is None:
-        logger.info("Plotting all orientations")
-    else:
-        logger.info(f"Plotting {args.maxpoints} number of points")
 
     rec_latt_vectors = _parse_star_lines_to_array(args.stream_file)
     logger.info(f"Number of crystals found: {np.shape(rec_latt_vectors)[0]}")
+    Npoints = min(args.maxpoints, np.size(rec_latt_vectors, axis=0))
+    logger.info(f"Plotting {Npoints} number of points")
 
     euler_angles_list = _convert_Rstar_to_euler_angles(rec_latt_vectors)
     logger.info("Vectors converted to Euler angles")
@@ -128,7 +126,7 @@ def parse_arguments():
     parser.add_argument(
         "--maxpoints",
         type=int,
-        default=None,
+        default=20000,
         help="Maximum number of points to plot from the stream file "
     )
 
@@ -172,9 +170,12 @@ def _parse_star_lines_to_array(filepath, encoding="utf-8"):
     parses the 3x3 matrix of floats per group, and returns an Nx3x3 numpy array.
     Args:
         filepath (str): Path to the input file.
+        encoding (str): Encoding used to decode byte strings.
     Returns:
         np.ndarray: A NumPy array of shape (N, 3, 3).
     """
+
+    logger = logging.getLogger(__name__)
     # Regex to match 'astar =' in binary and extract floats
     pattern = re.compile(rb"^astar = ")
 
@@ -284,7 +285,7 @@ def _euler_to_rotation_matrix(phi1, Phi, phi2):
     return Rz1 @ Rx @ Rz2
 
 
-def _combined_plot(euler_angles_list, png_filename, NmaxPoints=None):
+def _combined_plot(euler_angles_list, png_filename, NmaxPoints=20000):
     """
     Visualizes Euler angle histograms and crystal orientation
     projections using Lambert projection.
@@ -293,6 +294,8 @@ def _combined_plot(euler_angles_list, png_filename, NmaxPoints=None):
         euler_angles_list (np.ndarray): Array of shape (N, 3) containing
                                         Euler angles (phi1, Phi, phi2) in degrees.
         png_filename (str): Path of the generated png file.
+        NmaxPoints (int, optional): Maximum number of points to plot.
+                                    Default is 20000, to limit processing time.
     """
 
     # --- Helper Functions ---
@@ -322,12 +325,14 @@ def _combined_plot(euler_angles_list, png_filename, NmaxPoints=None):
             ]
         )
         sin_angle = np.linalg.norm(cross_prod)
-        return (
+
+        R = (
             np.eye(3)
             + skew_sym_matrix
             + skew_sym_matrix @ skew_sym_matrix *
             ((1 - dot_prod) / sin_angle**2)
         )
+        return R
 
     def _count_neighbors(points: np.ndarray, d: float = 0.2) -> np.ndarray:
         """Count the neightbours around the points.
@@ -373,7 +378,7 @@ def _combined_plot(euler_angles_list, png_filename, NmaxPoints=None):
 
     for col in range(1, 4):
         idx = col - 1
-        bins = np.linspace(*angle_limits[idx], 61)
+        bins = np.linspace(*angle_limits[idx], 121)
         angles = euler_angles_list[:, idx]
         hist_values, bin_edges = np.histogram(angles, bins=bins)
         bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
@@ -395,11 +400,11 @@ def _combined_plot(euler_angles_list, png_filename, NmaxPoints=None):
     # --- Compute Crystal Directions from Euler Angles ---
 
     np.random.seed(42)
-    if NmaxPoints is not None:
-        if NmaxPoints < len(euler_angles_list):
-            indices = np.random.choice(euler_angles_list.shape[0], size=NmaxPoints, replace=False)
-            euler_angles_list = euler_angles_list[indices]
-            
+    if NmaxPoints < len(euler_angles_list):
+        indices = np.random.choice(
+            euler_angles_list.shape[0], size=NmaxPoints, replace=False)
+        euler_angles_list = euler_angles_list[indices]
+
     directions = np.eye(3)
     crystal_directions = np.array(
         [
@@ -490,6 +495,8 @@ def _combined_plot(euler_angles_list, png_filename, NmaxPoints=None):
             )
         )
         axes[1, i].set_aspect("equal", "box")
+        axes[1, i].set_xticks(list(range(-2,3,1)))
+        axes[1, i].set_yticks(list(range(-2,3,1)))
 
     # --- Final Plot Touches ---
 
@@ -503,7 +510,7 @@ def _combined_plot(euler_angles_list, png_filename, NmaxPoints=None):
         width="50%",
         height="90%",
         loc="lower left",
-        bbox_to_anchor=(-0.60, 0.05, 0.5, 1),
+        bbox_to_anchor=(-0.20, 0.05, 0.5, 1),
         bbox_transform=axes[1, 0].transAxes,
         borderpad=0,
     )
