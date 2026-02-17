@@ -285,261 +285,288 @@ def _euler_to_rotation_matrix(phi1, Phi, phi2):
     return Rz1 @ Rx @ Rz2
 
 
-def _combined_plot(euler_angles_list, png_filename, NmaxPoints=20000):
-    """
-    Visualizes Euler angle histograms and crystal orientation
-    projections using Lambert projection.
-
-    Parameters:
-        euler_angles_list (np.ndarray): Array of shape (N, 3) containing
-                                        Euler angles (phi1, Phi, phi2) in degrees.
-        png_filename (str): Path of the generated png file.
-        NmaxPoints (int, optional): Maximum number of points to plot.
-                                    Default is 20000, to limit processing time.
-    """
-
-    # --- Helper Functions ---
-
-    # def _normalize(vector):
-    #     """Normalize a 3D vector."""
-    #     return vector / np.linalg.norm(vector)
-
-    def _rotation_matrix_from_vectors(source_vec, target_vec):
+def _combined_plot(euler_angles_list, png_filename, NmaxPoints=20000) -> None:
         """
-        Returns the rotation matrix that aligns source_vec to target_vec.
+        Visualizes Euler angle histograms and crystal orientation
+        projections using Lambert projection.
+
+        Parameters:
+            euler_angles_list (np.ndarray): Array of shape (N, 3) containing
+                                            Euler angles (phi1, Phi, phi2) in degrees.
+            png_filename (str): Path of the generated png file.
+            NmaxPoints (int, optional): Maximum number of points to plot.
+                                        Default is 20000, to limit processing time.
         """
-        a = source_vec / np.linalg.norm(source_vec)
-        b = target_vec / np.linalg.norm(target_vec)
-        # a, b = normalize(source_vec), normalize(target_vec)
-        cross_prod = np.cross(a, b)
-        dot_prod = np.dot(a, b)
 
-        if np.allclose(cross_prod, 0):  # Vectors are parallel or anti-parallel
-            return np.eye(3) if dot_prod > 0 else -np.eye(3)
+        # --- Helper Functions ---
 
-        skew_sym_matrix = np.array(
+        def _rotation_matrix_from_vectors(
+            source_vec: np.ndarray, target_vec: np.ndarray
+        ) -> np.ndarray:
+            """
+            Returns the rotation matrix that aligns source_vec to target_vec.
+            """
+            a = source_vec / np.linalg.norm(source_vec)
+            b = target_vec / np.linalg.norm(target_vec)
+            # a, b = normalize(source_vec), normalize(target_vec)
+            cross_prod = np.cross(a, b)
+            dot_prod = np.dot(a, b)
+
+            if np.allclose(cross_prod, 0):  # Vectors are parallel or anti-parallel
+                return np.eye(3) if dot_prod > 0 else -np.eye(3)
+
+            skew_sym_matrix = np.array(
+                [
+                    [0, -cross_prod[2], cross_prod[1]],
+                    [cross_prod[2], 0, -cross_prod[0]],
+                    [-cross_prod[1], cross_prod[0], 0],
+                ]
+            )
+            sin_angle = np.linalg.norm(cross_prod)
+            return (
+                np.eye(3)
+                + skew_sym_matrix
+                + skew_sym_matrix @ skew_sym_matrix * ((1 - dot_prod) / sin_angle**2)
+            )
+
+        def _count_neighbors(points: np.ndarray, d: float = 0.2) -> np.ndarray:
+            """Count the neightbours around the points.
+            This is used to assess relative density and to visualize it
+            with a color map.
+            """
+            tree = cKDTree(points)
+            counts = tree.query_ball_tree(tree, r=d)
+            # counts[i] is a list of indices within
+            # distance d from point i, including i itself
+            # Subtract 1 to exclude the point itself
+            neighbor_counts = np.array([len(c) - 1 for c in counts])
+            return neighbor_counts
+
+        def _lambert_projection(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            """Apply Lambert azimuthal equal-area projection to 3D points."""
+            x, y, z = points[:, 0], points[:, 1], points[:, 2]
+            denom = 1 + z
+            valid = denom > 1e-8
+            factor = np.zeros_like(denom)
+            factor[valid] = np.sqrt(2 / denom[valid])
+            return x * factor, y * factor
+
+        # --- Check the number of datapoints ---
+
+        logger = logging.getLogger(__name__)
+
+        Npoints = len(euler_angles_list)
+        logger.info(f"Collected {Npoints} crystal orientations.")
+        if Npoints > NmaxPoints:
+            logger.info(
+                f"Limiting the plotted points to {NmaxPoints} for faster processing."
+                "\nPoints are randomly selected from the full set."
+                "All points are used for histogram calculations."
+            )
+
+        # --- Visualization Settings ---
+
+        angle_labels = [r"$\phi_1$", r"$\Phi$", r"$\phi_2$"]
+        angle_limits = [[0, 360], [0, 180], [0, 360]]
+        histogram_colors = [
+            (19 / 255, 37 / 255, 119 / 255, 1),  # ESRF blue
+            (183 / 255, 185 / 255, 186 / 255, 1),  # ESRF grey
+            (237 / 255, 119 / 255, 3 / 255, 1),  # ESRF orange
+        ]
+
+        fig, axes = plt.subplots(
+            nrows=2,
+            ncols=4,
+            figsize=(12, 5.5),
+            gridspec_kw={"height_ratios": [1, 2], "width_ratios": [0.75, 4, 4, 4]},
+            dpi=150,
+        )
+
+        # --- Euler Angle Histograms ---
+
+        for col in range(1, 4):
+            idx = col - 1
+            bins = np.linspace(*angle_limits[idx], 61)
+            angles = euler_angles_list[:, idx]
+            hist_values, bin_edges = np.histogram(angles, bins=bins)
+            bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+            axes[0, col].bar(
+                bin_centers,
+                hist_values,
+                width=np.diff(bins)[0],
+                color=histogram_colors[idx],
+                # label=angle_labels[idx],
+            )
+            axes[0, col].set_xticks(
+                np.arange(0, angle_limits[idx][1] + 1, angle_limits[idx][1] // 6)
+            )
+            axes[0, col].text(
+                0.03,
+                0.94,
+                angle_labels[idx],
+                ha="left",
+                va="top",
+                transform=axes[0, col].transAxes,
+                fontsize=10,
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="black", lw=0.5),
+            )
+            axes[0, col].set_xlim(*angle_limits[idx])
+            axes[0, col].set_yticks([])
+            # axes[0, col].legend()
+
+        # --- Limit the number of points plotted ---
+
+        np.random.seed(42)
+        if NmaxPoints < len(euler_angles_list):
+            indices = np.random.choice(
+                euler_angles_list.shape[0], size=NmaxPoints, replace=False
+            )
+            euler_angles_list = euler_angles_list[indices]
+
+        # --- Compute Crystal Directions from Euler Angles ---
+
+        directions = np.eye(3)
+        crystal_directions = np.array(
             [
-                [0, -cross_prod[2], cross_prod[1]],
-                [cross_prod[2], 0, -cross_prod[0]],
-                [-cross_prod[1], cross_prod[0], 0],
+                _euler_to_rotation_matrix(*angles) @ np.array([0, 0, 1])
+                for angles in euler_angles_list
             ]
         )
-        sin_angle = np.linalg.norm(cross_prod)
 
-        R = (
-            np.eye(3)
-            + skew_sym_matrix
-            + skew_sym_matrix @ skew_sym_matrix *
-            ((1 - dot_prod) / sin_angle**2)
-        )
-        return R
+        # --- Projection Grid Setup ---
 
-    def _count_neighbors(points: np.ndarray, d: float = 0.2) -> np.ndarray:
-        """Count the neightbours around the points.
-        This is used to assess relative density and to visualize it
-        with a color map.
-        """
-        tree = cKDTree(points)
-        counts = tree.query_ball_tree(tree, r=d)
-        # counts[i] is a list of indices within
-        # distance d from point i, including i itself
-        # Subtract 1 to exclude the point itself
-        neighbor_counts = np.array([len(c) - 1 for c in counts])
-        return neighbor_counts
+        phi_angles = np.linspace(0, 2 * np.pi, 200)
+        theta_angles = np.linspace(-np.pi / 2, np.pi / 2, 200)
+        latitudes = np.deg2rad(np.arange(-90, 91, 30))
+        longitudes = np.deg2rad(np.arange(0, 360, 30))
 
-    def _lambert_projection(points):
-        """Apply Lambert azimuthal equal-area projection to 3D points."""
-        x, y, z = points[:, 0], points[:, 1], points[:, 2]
-        denom = 1 + z
-        valid = denom > 1e-8
-        factor = np.zeros_like(denom)
-        factor[valid] = np.sqrt(2 / denom[valid])
-        return x * factor, y * factor
+        # --- Color Coding Based on Neighbor Count ---
 
-    # --- Visualization Settings ---
+        neighbor_counts = _count_neighbors(crystal_directions, d=0.2)
+        max_color_bins = 8
+        color_values = neighbor_counts * max_color_bins / (4 * np.pi) / max_color_bins
+        color_max = np.quantile(neighbor_counts / (4 * np.pi), 0.75)
+        color_min = 0
 
-    angle_labels = [r"$\phi_1$", r"$\Phi$", r"$\phi_2$"]
-    angle_limits = [[0, 360], [0, 180], [0, 360]]
-    histogram_colors = [
-        (19 / 255, 37 / 255, 119 / 255, 1),
-        (183 / 255, 185 / 255, 186 / 255, 1),
-        (237 / 255, 119 / 255, 3 / 255, 1),
-    ]
+        # --- Plot Lambert Projections ---
 
-    fig, axes = plt.subplots(
-        nrows=2,
-        ncols=4,
-        figsize=(12, 5.5),
-        gridspec_kw={"height_ratios": [1, 2], "width_ratios": [0.75, 4, 4, 4]},
-        dpi=150,
-    )
+        for i, projection_axis in enumerate(directions, start=1):
+            rot_matrix = _rotation_matrix_from_vectors(projection_axis, [0, 0, 1])
+            rotated_dirs = crystal_directions @ rot_matrix.T
+            proj_x, proj_y = _lambert_projection(rotated_dirs)
 
-    # --- Euler Angle Histograms ---
+            scatter = axes[1, i].scatter(
+                proj_x,
+                proj_y,
+                s=2,
+                alpha=0.75,
+                c=color_values,
+                cmap="rainbow",
+                vmin=color_min,
+                vmax=color_max,
+                lw=0.0,
+            )
 
-    for col in range(1, 4):
-        idx = col - 1
-        bins = np.linspace(*angle_limits[idx], 121)
-        angles = euler_angles_list[:, idx]
-        hist_values, bin_edges = np.histogram(angles, bins=bins)
-        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+            axes[1, i].text(
+                -2.15,
+                2.15,
+                f"Lambert prj.\n{projection_axis}",
+                ha="left",
+                va="top",
+                fontsize=9,
+            )
 
-        axes[0, col].bar(
-            bin_centers,
-            hist_values,
-            width=np.diff(bins)[0],
-            color=histogram_colors[idx],
-            label=angle_labels[idx],
-        )
-        axes[0, col].set_xticks(
-            np.arange(0, angle_limits[idx][1] + 1, angle_limits[idx][1] // 6)
-        )
-        axes[0, col].set_xlim(*angle_limits[idx])
-        axes[0, col].set_yticks([])
-        axes[0, col].legend()
-
-    # --- Compute Crystal Directions from Euler Angles ---
-
-    np.random.seed(42)
-    if NmaxPoints < len(euler_angles_list):
-        indices = np.random.choice(
-            euler_angles_list.shape[0], size=NmaxPoints, replace=False)
-        euler_angles_list = euler_angles_list[indices]
-
-    directions = np.eye(3)
-    crystal_directions = np.array(
-        [
-            _euler_to_rotation_matrix(*angles) @ np.array([0, 0, 1])
-            for angles in euler_angles_list
-        ]
-    )
-
-    # --- Projection Grid Setup ---
-
-    phi_angles = np.linspace(0, 2 * np.pi, 200)
-    theta_angles = np.linspace(-np.pi / 2, np.pi / 2, 200)
-    latitudes = np.deg2rad(np.arange(-90, 91, 30))
-    longitudes = np.deg2rad(np.arange(0, 360, 30))
-
-    # --- Color Coding Based on Neighbor Count ---
-
-    neighbor_counts = _count_neighbors(crystal_directions, d=0.2)
-    max_color_bins = 8
-    color_values = neighbor_counts * \
-        max_color_bins / (4 * np.pi) / max_color_bins
-    color_max = np.quantile(neighbor_counts / (4 * np.pi), 0.75)
-    color_min = 0
-
-    # --- Plot Lambert Projections ---
-
-    for i, projection_axis in enumerate(directions, start=1):
-        rot_matrix = _rotation_matrix_from_vectors(projection_axis, [0, 0, 1])
-        rotated_dirs = crystal_directions @ rot_matrix.T
-        proj_x, proj_y = _lambert_projection(rotated_dirs)
-
-        scatter = axes[1, i].scatter(
-            proj_x,
-            proj_y,
-            s=2,
-            alpha=0.75,
-            c=color_values,
-            cmap="rainbow",
-            vmin=color_min,
-            vmax=color_max,
-            lw=0.0,
-        )
-
-        axes[1, i].text(
-            -2.15, 2.15, f"Lambert prj.\n{projection_axis}", ha="left", va="top"
-        )
-
-        # Draw latitude lines
-        for lat in latitudes:
-            lat_circle = (
-                np.stack(
-                    (
-                        np.cos(phi_angles) * np.cos(lat),
-                        np.sin(phi_angles) * np.cos(lat),
-                        np.full_like(phi_angles, np.sin(lat)),
-                    ),
-                    axis=-1,
+            # Draw latitude lines
+            for lat in latitudes:
+                lat_circle = (
+                    np.stack(
+                        (
+                            np.cos(phi_angles) * np.cos(lat),
+                            np.sin(phi_angles) * np.cos(lat),
+                            np.full_like(phi_angles, np.sin(lat)),
+                        ),
+                        axis=-1,
+                    )
+                    @ rot_matrix.T
                 )
-                @ rot_matrix.T
-            )
-            gx, gy = _lambert_projection(lat_circle)
-            axes[1, i].plot(
-                gx, gy, color="k", lw=0.5, alpha=0.6, ls=(0, (3.5, 2.0))
-            )
-
-        # Draw longitude lines
-        for lon in longitudes:
-            lon_line = (
-                np.stack(
-                    (
-                        np.cos(theta_angles) * np.cos(lon),
-                        np.cos(theta_angles) * np.sin(lon),
-                        np.sin(theta_angles),
-                    ),
-                    axis=-1,
+                gx, gy = _lambert_projection(lat_circle)
+                axes[1, i].plot(
+                    gx, gy, color="k", lw=0.5, alpha=0.6, ls=(0, (3.5, 2.0))
                 )
-                @ rot_matrix.T
-            )
-            gx, gy = _lambert_projection(lon_line)
-            axes[1, i].plot(
-                gx, gy, color="k", lw=0.5, alpha=0.6, ls=(0, (3.5, 2.0))
-            )
 
-        # Add boundary circle
-        axes[1, i].add_patch(
-            plt.Circle(
-                (0, 0), 2, color="black", fill=False, lw=1.0, ls=(0, (3.5, 2.0))
+            # Draw longitude lines
+            for lon in longitudes:
+                lon_line = (
+                    np.stack(
+                        (
+                            np.cos(theta_angles) * np.cos(lon),
+                            np.cos(theta_angles) * np.sin(lon),
+                            np.sin(theta_angles),
+                        ),
+                        axis=-1,
+                    )
+                    @ rot_matrix.T
+                )
+                gx, gy = _lambert_projection(lon_line)
+                axes[1, i].plot(
+                    gx, gy, color="k", lw=0.5, alpha=0.6, ls=(0, (3.5, 2.0))
+                )
+
+            # Add boundary circle
+            axes[1, i].add_patch(
+                plt.Circle(
+                    (0, 0), 2, color="black", fill=False, lw=1.0, ls=(0, (3.5, 2.0))
+                )
             )
+            axes[1, i].set_aspect("equal", "box")
+            axes[1, i].set_xticks(list(range(-2, 3, 1)))
+            axes[1, i].set_yticks(list(range(-2, 3, 1)))
+
+        # --- Final Plot Touches ---
+
+        plt.suptitle(
+            "Crystal Orientation Probability Distributions", y=0.94, fontsize=10
         )
-        axes[1, i].set_aspect("equal", "box")
-        axes[1, i].set_xticks(list(range(-2,3,1)))
-        axes[1, i].set_yticks(list(range(-2,3,1)))
 
-    # --- Final Plot Touches ---
+        # Colorbar inset
+        colorbar_ax = inset_axes(
+            axes[1, 0],
+            width="50%",
+            height="90%",
+            loc="lower left",
+            bbox_to_anchor=(-0.20, 0.05, 0.5, 1),
+            bbox_transform=axes[1, 0].transAxes,
+            borderpad=0,
+        )
+        cbar = plt.colorbar(scatter, cax=colorbar_ax, extend="max")
+        cbar.set_label(r"Relative angular density, $\rho/\rho_{av}$", fontsize=10)
 
-    plt.suptitle(
-        "Crystal Orientation Probability Distributions", y=0.94, fontsize=10
-    )
+        # Remove unused axes
+        axes[0, 0].axis("off")
+        axes[1, 0].axis("off")
 
-    # Colorbar inset
-    colorbar_ax = inset_axes(
-        axes[1, 0],
-        width="50%",
-        height="90%",
-        loc="lower left",
-        bbox_to_anchor=(-0.20, 0.05, 0.5, 1),
-        bbox_transform=axes[1, 0].transAxes,
-        borderpad=0,
-    )
-    cbar = plt.colorbar(scatter, cax=colorbar_ax, extend="max")
-    cbar.set_label(r"Relative angular density, $\rho/\rho_{av}$", fontsize=10)
+        # Explanatory text
+        annotation_text = (
+            "\n\nEuler angle\n"
+            r"histograms $\to$"
+            "\n\n\n"
+            r"$\vec{c}$"
+            " unit vector\n"
+            "orientations\n"
+            r"$\Rdsh$"
+        )
+        axes[0, 0].text(
+            0.5, 0.5, annotation_text, ha="center", va="center", fontsize=10
+        )
 
-    # Remove unused axes
-    axes[0, 0].axis("off")
-    axes[1, 0].axis("off")
+        plt.subplots_adjust(top=0.88)
 
-    # Explanatory text
-    annotation_text = (
-        "\n\nEuler angle\n"
-        r"histograms $\to$"
-        "\n\n\n"
-        r"$\vec{c}$"
-        " unit vector\n"
-        "orientations\n"
-        r"$\Rdsh$"
-    )
-    axes[0, 0].text(
-        0.5, 0.5, annotation_text, ha="center", va="center", fontsize=10
-    )
-
-    plt.subplots_adjust(top=0.88)
-
-    # plt.tight_layout()
-    plt.savefig(png_filename, dpi=500, bbox_inches="tight")
-    plt.close()
+        plt.savefig(png_filename, dpi=500, bbox_inches="tight")
+        logger.info(
+            f"Euler histograms and crystal orientation plots saved to\n {png_filename}"
+        )
+        plt.close()
 
 
 if __name__ == "__main__":
